@@ -1,131 +1,109 @@
-//! ADS8681 Driver
+//! # ADS8681 Driver
 //!
 //! Platform-agnostic Rust driver for the Texas Instruments ADS8681
-//! 16-bit, 1 MSPS, Single-Supply SAR ADC with Programmable Bipolar Input Ranges
+//! 16-bit, 1 MSPS, Single-Supply SAR ADC with Programmable Bipolar Input Ranges.
 //!
 //! This driver uses the `embedded-hal` traits for SPI communication,
 //! making it portable across different embedded platforms.
 //!
-//! # Features
+//! ## Features
+//!
 //! - Read 16-bit ADC conversions
 //! - Configure programmable input ranges (±12.288V to ±2.56V bipolar, 0-12.288V to 0-5.12V unipolar)
 //! - Read and write device registers
-//! - Read device ID
-//! - Configure alarms and thresholds
+//! - Verify device communication via device ID check
+//! - Configure alarm thresholds
+//! - Convert raw ADC values to voltages
+//! - `no_std` compatible
+//! - Comprehensive test coverage with mock SPI
 //!
-//! # Example
+//! ## Quick Start
+//!
 //! ```no_run
-//! use ads8681_driver::{ADS8681, InputRange};
+//! use ads8681_driver::{ADS8681, InputRange, raw_to_voltage};
 //! # use embedded_hal_mock::eh1::spi::{Mock as SpiMock, Transaction as SpiTransaction};
 //! # use embedded_hal_mock::eh1::digital::Mock as PinMock;
 //! # let spi = SpiMock::new(&[]);
 //! # let cs = PinMock::new(&[]);
 //!
+//! // Create driver instance
 //! let mut adc = ADS8681::new(spi, cs);
-//! adc.set_input_range(InputRange::BipolarThreeVref).unwrap();
-//! let value = adc.read_adc().unwrap();
+//!
+//! // Initialize and verify communication (returns device ID 0x0681)
+//! // adc.init().expect("Failed to initialize");
+//!
+//! // Configure input range
+//! // adc.set_input_range(InputRange::BipolarThreeVref)
+//! //     .expect("Failed to set range");
+//!
+//! // Read ADC value
+//! // let raw = adc.read_adc().expect("Failed to read ADC");
+//! // let voltage = raw_to_voltage(raw, InputRange::BipolarThreeVref, 4.096);
 //! ```
+//!
+//! ## SPI Configuration
+//!
+//! The ADS8681 SPI interface requires:
+//! - **SPI Mode**: MODE_0 (CPOL=0, CPHA=0)
+//! - **Clock Speed**: Up to 1 MHz
+//! - **Bit Order**: MSB first
+//! - **Frame Size**: 4 bytes (32 bits)
+//!
+//! ## Module Organization
+//!
+//! - [`error`] - Error types
+//! - [`register`] - Register definitions and constants
+//! - [`command`] - SPI command encoding/decoding
+//! - [`range`] - Input range configuration and voltage conversion
 
 #![no_std]
+#![deny(missing_docs)]
+#![deny(unsafe_code)]
 
 use embedded_hal::digital::OutputPin;
 use embedded_hal::spi::SpiDevice;
 
-/// SPI command opcodes for ADS8681
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-pub enum Command {
-    /// No operation
-    Nop = 0b0000000,
-    /// Clear half-word (16-bit)
-    ClearHword = 0b1100000,
-    /// Read half-word (16-bit) from register
-    ReadHword = 0b1100100,
-    /// Read full word from register
-    Read = 0b0100100,
-    /// Write full 16-bit word to register
-    WriteFull = 0b1101000,
-    /// Write most significant byte to register
-    WriteMs = 0b1101001,
-    /// Write least significant byte to register
-    WriteLs = 0b1101010,
-    /// Set half-word
-    SetHword = 0b1101100,
-}
+// Public modules
+pub mod command;
+pub mod error;
+pub mod range;
+pub mod register;
 
-/// Register addresses for ADS8681
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u16)]
-pub enum Register {
-    /// Device ID register
-    DeviceId = 0x00,
-    /// Reset and power control register
-    RstPwrctl = 0x04,
-    /// SDI control register
-    SdiCtl = 0x08,
-    /// SDO control register
-    SdoCtl = 0x0C,
-    /// Data output control register
-    DataoutCtl = 0x10,
-    /// Range selection register
-    RangeSel = 0x14,
-    /// Alarm configuration register
-    Alarm = 0x20,
-    /// Alarm high threshold register
-    AlarmHTh = 0x24,
-    /// Alarm low threshold register
-    AlarmLTh = 0x28,
-}
+// Private test module
+#[cfg(test)]
+mod tests;
 
-/// Input range configurations
-///
-/// The ADS8681 supports both bipolar and unipolar input ranges.
-/// Vref is typically 4.096V, giving actual voltage ranges:
-/// - BipolarThreeVref: ±12.288V
-/// - BipolarTwoPointFiveVref: ±10.24V
-/// - BipolarOnePointFiveVref: ±6.144V
-/// - BipolarOnePointTwoFiveVref: ±5.12V
-/// - BipolarZeroPointSixTwoFiveVref: ±2.56V
-/// - UnipolarThreeVref: 0 to 12.288V
-/// - UnipolarTwoPointFiveVref: 0 to 10.24V
-/// - UnipolarOnePointFiveVref: 0 to 6.144V
-/// - UnipolarOnePointTwoFiveVref: 0 to 5.12V
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u16)]
-pub enum InputRange {
-    /// Bipolar ±3 × Vref (±12.288V with 4.096V reference)
-    BipolarThreeVref = 0b0000,
-    /// Bipolar ±2.5 × Vref (±10.24V with 4.096V reference)
-    BipolarTwoPointFiveVref = 0b0001,
-    /// Bipolar ±1.5 × Vref (±6.144V with 4.096V reference)
-    BipolarOnePointFiveVref = 0b0010,
-    /// Bipolar ±1.25 × Vref (±5.12V with 4.096V reference)
-    BipolarOnePointTwoFiveVref = 0b0011,
-    /// Bipolar ±0.625 × Vref (±2.56V with 4.096V reference)
-    BipolarZeroPointSixTwoFiveVref = 0b0100,
-    /// Unipolar 0 to 3 × Vref (0 to 12.288V with 4.096V reference)
-    UnipolarThreeVref = 0b1000,
-    /// Unipolar 0 to 2.5 × Vref (0 to 10.24V with 4.096V reference)
-    UnipolarTwoPointFiveVref = 0b1001,
-    /// Unipolar 0 to 1.5 × Vref (0 to 6.144V with 4.096V reference)
-    UnipolarOnePointFiveVref = 0b1010,
-    /// Unipolar 0 to 1.25 × Vref (0 to 5.12V with 4.096V reference)
-    UnipolarOnePointTwoFiveVref = 0b1011,
-}
-
-/// Error types for ADS8681 operations
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Error<E> {
-    /// SPI communication error
-    Spi(E),
-    /// Invalid device ID
-    InvalidDeviceId,
-}
+// Re-export commonly used types
+pub use command::Command;
+pub use error::Error;
+pub use range::{raw_to_voltage, voltage_to_raw, InputRange, STANDARD_VREF};
+pub use register::{Register, DEVICE_ID};
 
 /// ADS8681 driver instance
+///
+/// This is the main driver struct that provides an interface to the ADS8681 ADC.
+/// It uses generic types for the SPI bus and chip select pin to support any
+/// platform that implements the `embedded-hal` traits.
+///
+/// # Type Parameters
+///
+/// * `SPI` - SPI device implementing the `SpiDevice` trait
+/// * `CS` - Chip select pin implementing the `OutputPin` trait (currently unused but reserved)
+///
+/// # Examples
+///
+/// ```no_run
+/// use ads8681_driver::ADS8681;
+/// # use embedded_hal_mock::eh1::spi::Mock as SpiMock;
+/// # use embedded_hal_mock::eh1::digital::Mock as PinMock;
+/// # let spi = SpiMock::new(&[]);
+/// # let cs_pin = PinMock::new(&[]);
+///
+/// let mut adc = ADS8681::new(spi, cs_pin);
+/// ```
 pub struct ADS8681<SPI, CS> {
     spi: SPI,
-    cs: CS,
+    cs: CS, // Reserved for future use with manual CS control
 }
 
 impl<SPI, CS, E> ADS8681<SPI, CS>
@@ -135,21 +113,66 @@ where
 {
     /// Create a new ADS8681 driver instance
     ///
+    /// Creates a new driver instance without performing any initialization.
+    /// Call [`init()`](Self::init) after creation to verify device communication.
+    ///
     /// # Arguments
-    /// * `spi` - SPI peripheral implementing the embedded-hal SpiDevice trait
-    /// * `cs` - Chip select pin implementing the OutputPin trait
+    ///
+    /// * `spi` - SPI device configured for the ADS8681 (MODE_0, up to 1 MHz)
+    /// * `cs` - Chip select pin (reserved for future manual CS control)
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use ads8681_driver::ADS8681;
+    /// # use embedded_hal_mock::eh1::spi::Mock as SpiMock;
+    /// # use embedded_hal_mock::eh1::digital::Mock as PinMock;
+    /// # let spi = SpiMock::new(&[]);
+    /// # let cs_pin = PinMock::new(&[]);
+    ///
+    /// let adc = ADS8681::new(spi, cs_pin);
+    /// ```
     pub fn new(spi: SPI, cs: CS) -> Self {
         Self { spi, cs }
     }
 
     /// Initialize the device and verify communication
     ///
-    /// Reads the device ID register to verify proper communication
+    /// Reads the device ID register and verifies it matches the expected value (0x0681).
+    /// This confirms proper SPI communication with the ADS8681.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(device_id)` - Device ID (should be 0x0681)
+    /// * `Err(Error::InvalidDeviceId)` - If device ID doesn't match
+    /// * `Err(Error::Spi(e))` - If SPI communication fails
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use ads8681_driver::ADS8681;
+    /// # use embedded_hal_mock::eh1::spi::{Mock as SpiMock, Transaction as SpiTransaction};
+    /// # use embedded_hal_mock::eh1::digital::Mock as PinMock;
+    /// # let spi = SpiMock::new(&[
+    /// #     SpiTransaction::transaction_start(),
+    /// #     SpiTransaction::transfer(vec![0xC8, 0x00, 0x00, 0x00], vec![0, 0, 0, 0]),
+    /// #     SpiTransaction::transaction_end(),
+    /// #     SpiTransaction::transaction_start(),
+    /// #     SpiTransaction::transfer(vec![0x00, 0x00, 0x00, 0x00], vec![0x06, 0x81, 0, 0]),
+    /// #     SpiTransaction::transaction_end(),
+    /// # ]);
+    /// # let cs = PinMock::new(&[]);
+    /// let mut adc = ADS8681::new(spi, cs);
+    ///
+    /// match adc.init() {
+    ///     Ok(id) => println!("Device ID: 0x{:04X}", id),
+    ///     Err(_) => println!("Failed to initialize"),
+    /// }
+    /// ```
     pub fn init(&mut self) -> Result<u16, Error<E>> {
         let device_id = self.read_register(Register::DeviceId)?;
 
-        // Device ID for ADS8681 should be 0x0681
-        if device_id != 0x0681 {
+        if device_id != DEVICE_ID {
             return Err(Error::InvalidDeviceId);
         }
 
@@ -158,330 +181,287 @@ where
 
     /// Read a 16-bit value from the ADC
     ///
-    /// This performs a conversion and returns the 16-bit result.
-    /// The value is a signed or unsigned 16-bit integer depending on
-    /// the configured input range (bipolar vs unipolar).
+    /// Performs a conversion and returns the 16-bit result. The interpretation of this
+    /// value (signed vs unsigned) depends on the configured input range:
+    /// - Bipolar ranges: Interpret as `i16` (two's complement)
+    /// - Unipolar ranges: Interpret as `u16`
+    ///
+    /// Use [`raw_to_voltage()`] to convert the raw value to a voltage.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(u16)` - 16-bit ADC conversion result
+    /// * `Err(Error::Spi(e))` - If SPI communication fails
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use ads8681_driver::{ADS8681, InputRange, raw_to_voltage};
+    /// # use embedded_hal_mock::eh1::spi::{Mock as SpiMock, Transaction as SpiTransaction};
+    /// # use embedded_hal_mock::eh1::digital::Mock as PinMock;
+    /// # let spi = SpiMock::new(&[
+    /// #     SpiTransaction::transaction_start(),
+    /// #     SpiTransaction::transfer(vec![0x00, 0x00, 0x00, 0x00], vec![0x7F, 0xFF, 0, 0]),
+    /// #     SpiTransaction::transaction_end(),
+    /// # ]);
+    /// # let cs = PinMock::new(&[]);
+    /// # let mut adc = ADS8681::new(spi, cs);
+    /// let raw = adc.read_adc().unwrap();
+    /// let voltage = raw_to_voltage(raw, InputRange::BipolarThreeVref, 4.096);
+    /// ```
     pub fn read_adc(&mut self) -> Result<u16, Error<E>> {
         // Send NOP command to trigger conversion and read previous result
         let response = self.send_command(Command::Nop, 0x00, 0x0000)?;
 
         // ADC data is in the upper 16 bits of the response
-        Ok((response >> 16) as u16)
+        Ok(command::extract_adc_data(response))
     }
 
     /// Set the input range configuration
     ///
+    /// Configures the ADC input range. The range determines the full-scale voltage
+    /// and whether the output is signed (bipolar) or unsigned (unipolar).
+    ///
     /// # Arguments
-    /// * `range` - Desired input range from the InputRange enum
+    ///
+    /// * `range` - Desired input range from the [`InputRange`] enum
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use ads8681_driver::{ADS8681, InputRange};
+    /// # use embedded_hal_mock::eh1::spi::{Mock as SpiMock, Transaction as SpiTransaction};
+    /// # use embedded_hal_mock::eh1::digital::Mock as PinMock;
+    /// # let spi = SpiMock::new(&[
+    /// #     SpiTransaction::transaction_start(),
+    /// #     SpiTransaction::transfer(vec![0xD0, 0x14, 0x00, 0x01], vec![0, 0, 0, 0]),
+    /// #     SpiTransaction::transaction_end(),
+    /// # ]);
+    /// # let cs = PinMock::new(&[]);
+    /// # let mut adc = ADS8681::new(spi, cs);
+    /// // Set to ±10.24V range
+    /// adc.set_input_range(InputRange::BipolarTwoPointFiveVref).unwrap();
+    /// ```
     pub fn set_input_range(&mut self, range: InputRange) -> Result<(), Error<E>> {
-        self.write_register(Register::RangeSel, range as u16)
+        self.write_register(Register::RangeSel, range.value())
     }
 
     /// Get the current input range configuration
+    ///
+    /// Reads the RANGE_SEL register and returns the configured input range.
+    /// If the register contains an invalid value, returns the default range
+    /// (BipolarThreeVref).
+    ///
+    /// # Returns
+    ///
+    /// The currently configured [`InputRange`]
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use ads8681_driver::{ADS8681, InputRange};
+    /// # use embedded_hal_mock::eh1::spi::{Mock as SpiMock, Transaction as SpiTransaction};
+    /// # use embedded_hal_mock::eh1::digital::Mock as PinMock;
+    /// # let spi = SpiMock::new(&[
+    /// #     SpiTransaction::transaction_start(),
+    /// #     SpiTransaction::transfer(vec![0xC8, 0x14, 0x00, 0x00], vec![0, 0, 0, 0]),
+    /// #     SpiTransaction::transaction_end(),
+    /// #     SpiTransaction::transaction_start(),
+    /// #     SpiTransaction::transfer(vec![0x00, 0x00, 0x00, 0x00], vec![0x00, 0x01, 0, 0]),
+    /// #     SpiTransaction::transaction_end(),
+    /// # ]);
+    /// # let cs = PinMock::new(&[]);
+    /// # let mut adc = ADS8681::new(spi, cs);
+    /// let range = adc.get_input_range().unwrap();
+    /// println!("Current range: {}", range.name());
+    /// ```
     pub fn get_input_range(&mut self) -> Result<InputRange, Error<E>> {
         let value = self.read_register(Register::RangeSel)?;
 
-        // Map the register value back to InputRange enum
-        match value & 0x0F {
-            0b0000 => Ok(InputRange::BipolarThreeVref),
-            0b0001 => Ok(InputRange::BipolarTwoPointFiveVref),
-            0b0010 => Ok(InputRange::BipolarOnePointFiveVref),
-            0b0011 => Ok(InputRange::BipolarOnePointTwoFiveVref),
-            0b0100 => Ok(InputRange::BipolarZeroPointSixTwoFiveVref),
-            0b1000 => Ok(InputRange::UnipolarThreeVref),
-            0b1001 => Ok(InputRange::UnipolarTwoPointFiveVref),
-            0b1010 => Ok(InputRange::UnipolarOnePointFiveVref),
-            0b1011 => Ok(InputRange::UnipolarOnePointTwoFiveVref),
-            _ => Ok(InputRange::BipolarThreeVref), // Default fallback
-        }
+        // Convert register value to InputRange, defaulting to BipolarThreeVref if invalid
+        Ok(InputRange::from_register_value(value).unwrap_or(InputRange::BipolarThreeVref))
     }
 
-    /// Read a 16-bit register value
+    /// Read a 16-bit value from a register
+    ///
+    /// Reads a register using the two-step process:
+    /// 1. Send READ_HWORD command with register address
+    /// 2. Send NOP command to retrieve the register data
     ///
     /// # Arguments
+    ///
     /// * `reg` - Register to read from
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(u16)` - 16-bit register value
+    /// * `Err(Error::Spi(e))` - If SPI communication fails
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use ads8681_driver::{ADS8681, Register};
+    /// # use embedded_hal_mock::eh1::spi::{Mock as SpiMock, Transaction as SpiTransaction};
+    /// # use embedded_hal_mock::eh1::digital::Mock as PinMock;
+    /// # let spi = SpiMock::new(&[
+    /// #     SpiTransaction::transaction_start(),
+    /// #     SpiTransaction::transfer(vec![0xC8, 0x00, 0x00, 0x00], vec![0, 0, 0, 0]),
+    /// #     SpiTransaction::transaction_end(),
+    /// #     SpiTransaction::transaction_start(),
+    /// #     SpiTransaction::transfer(vec![0x00, 0x00, 0x00, 0x00], vec![0x06, 0x81, 0, 0]),
+    /// #     SpiTransaction::transaction_end(),
+    /// # ]);
+    /// # let cs = PinMock::new(&[]);
+    /// # let mut adc = ADS8681::new(spi, cs);
+    /// let device_id = adc.read_register(Register::DeviceId).unwrap();
+    /// ```
     pub fn read_register(&mut self, reg: Register) -> Result<u16, Error<E>> {
-        // Send READ_HWORD command
-        self.send_command(Command::ReadHword, reg as u16, 0x0000)?;
+        // Step 1: Send READ_HWORD command
+        self.send_command(Command::ReadHword, reg.address(), 0x0000)?;
 
-        // Send NOP to retrieve the register data
+        // Step 2: Send NOP to retrieve the register data
         let response = self.send_command(Command::Nop, 0x00, 0x0000)?;
 
         // Register data is in the upper 16 bits
-        Ok((response >> 16) as u16)
+        Ok(command::extract_register_data(response))
     }
 
     /// Write a 16-bit value to a register
     ///
+    /// Writes a value to the specified register using the WRITE_FULL command.
+    ///
     /// # Arguments
+    ///
     /// * `reg` - Register to write to
     /// * `value` - 16-bit value to write
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - Write successful
+    /// * `Err(Error::Spi(e))` - If SPI communication fails
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use ads8681_driver::{ADS8681, Register};
+    /// # use embedded_hal_mock::eh1::spi::{Mock as SpiMock, Transaction as SpiTransaction};
+    /// # use embedded_hal_mock::eh1::digital::Mock as PinMock;
+    /// # let spi = SpiMock::new(&[
+    /// #     SpiTransaction::transaction_start(),
+    /// #     SpiTransaction::transfer(vec![0xD0, 0x14, 0x00, 0x03], vec![0, 0, 0, 0]),
+    /// #     SpiTransaction::transaction_end(),
+    /// # ]);
+    /// # let cs = PinMock::new(&[]);
+    /// # let mut adc = ADS8681::new(spi, cs);
+    /// adc.write_register(Register::RangeSel, 0x0003).unwrap();
+    /// ```
     pub fn write_register(&mut self, reg: Register, value: u16) -> Result<(), Error<E>> {
-        self.send_command(Command::WriteFull, reg as u16, value)?;
+        self.send_command(Command::WriteFull, reg.address(), value)?;
         Ok(())
     }
 
     /// Reset the device
+    ///
+    /// Performs a software reset by writing to the RST_PWRCTL register.
+    /// After reset, all registers return to their default values.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use ads8681_driver::ADS8681;
+    /// # use embedded_hal_mock::eh1::spi::{Mock as SpiMock, Transaction as SpiTransaction};
+    /// # use embedded_hal_mock::eh1::digital::Mock as PinMock;
+    /// # let spi = SpiMock::new(&[
+    /// #     SpiTransaction::transaction_start(),
+    /// #     SpiTransaction::transfer(vec![0xD0, 0x04, 0x80, 0x00], vec![0, 0, 0, 0]),
+    /// #     SpiTransaction::transaction_end(),
+    /// # ]);
+    /// # let cs = PinMock::new(&[]);
+    /// # let mut adc = ADS8681::new(spi, cs);
+    /// adc.reset().unwrap();
+    /// ```
     pub fn reset(&mut self) -> Result<(), Error<E>> {
-        // Write to RST_PWRCTL register with reset bit set
-        self.write_register(Register::RstPwrctl, 0x8000)
+        self.write_register(Register::RstPwrctl, register::RST_BIT)
     }
 
-    /// Set alarm high threshold
+    /// Set the alarm high threshold
+    ///
+    /// Configures the upper threshold for the alarm comparator.
     ///
     /// # Arguments
+    ///
     /// * `threshold` - 16-bit threshold value
     pub fn set_alarm_high_threshold(&mut self, threshold: u16) -> Result<(), Error<E>> {
         self.write_register(Register::AlarmHTh, threshold)
     }
 
-    /// Set alarm low threshold
+    /// Set the alarm low threshold
+    ///
+    /// Configures the lower threshold for the alarm comparator.
     ///
     /// # Arguments
+    ///
     /// * `threshold` - 16-bit threshold value
     pub fn set_alarm_low_threshold(&mut self, threshold: u16) -> Result<(), Error<E>> {
         self.write_register(Register::AlarmLTh, threshold)
     }
 
-    /// Get alarm high threshold
+    /// Get the alarm high threshold
+    ///
+    /// Reads the current high threshold value.
     pub fn get_alarm_high_threshold(&mut self) -> Result<u16, Error<E>> {
         self.read_register(Register::AlarmHTh)
     }
 
-    /// Get alarm low threshold
+    /// Get the alarm low threshold
+    ///
+    /// Reads the current low threshold value.
     pub fn get_alarm_low_threshold(&mut self) -> Result<u16, Error<E>> {
         self.read_register(Register::AlarmLTh)
     }
 
-    /// Send a 4-byte SPI command to the device and return the 4-byte response
+    /// Send a 4-byte SPI command and receive a 4-byte response
+    ///
+    /// Low-level SPI transaction method. Encodes a command and performs the SPI transfer.
     ///
     /// # Arguments
+    ///
     /// * `cmd` - Command opcode
     /// * `addr` - Register address (9-bit)
     /// * `data` - 16-bit data payload
     ///
     /// # Returns
+    ///
     /// 32-bit response from the device
     fn send_command(&mut self, cmd: Command, addr: u16, data: u16) -> Result<u32, Error<E>> {
-        // Construct the 4-byte command packet
-        // Byte 0: Command (7 bits) << 1 | Address MSB (bit 8)
-        // Byte 1: Address LSB (bits 7-0)
-        // Byte 2: Data MSB
-        // Byte 3: Data LSB
-        let mut tx_buf = [0u8; 4];
+        let tx_buf = command::encode_command(cmd, addr, data);
         let mut rx_buf = [0u8; 4];
 
-        tx_buf[0] = ((cmd as u8) << 1) | (((addr >> 8) & 0x01) as u8);
-        tx_buf[1] = (addr & 0xFF) as u8;
-        tx_buf[2] = ((data >> 8) & 0xFF) as u8;
-        tx_buf[3] = (data & 0xFF) as u8;
-
-        // Perform SPI transaction
+        // Perform SPI transaction (CS is handled automatically by SpiDevice)
         self.spi.transfer(&mut rx_buf, &tx_buf).map_err(Error::Spi)?;
 
-        // Assemble 32-bit response
-        let response = ((rx_buf[0] as u32) << 24)
-            | ((rx_buf[1] as u32) << 16)
-            | ((rx_buf[2] as u32) << 8)
-            | (rx_buf[3] as u32);
-
-        Ok(response)
+        // Decode and return response
+        Ok(command::decode_response(&rx_buf))
     }
 
-    /// Consume the driver and return the SPI and CS pin
+    /// Consume the driver and return the SPI bus and CS pin
+    ///
+    /// This allows you to reuse the SPI peripheral and GPIO pin for other purposes.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use ads8681_driver::ADS8681;
+    /// # use embedded_hal_mock::eh1::spi::Mock as SpiMock;
+    /// # use embedded_hal_mock::eh1::digital::Mock as PinMock;
+    /// # let spi = SpiMock::new(&[]);
+    /// # let cs = PinMock::new(&[]);
+    /// let adc = ADS8681::new(spi, cs);
+    /// // ... use the ADC ...
+    /// let (spi, cs) = adc.release();
+    /// // ... use spi and cs for something else ...
+    /// ```
     pub fn release(self) -> (SPI, CS) {
         (self.spi, self.cs)
-    }
-}
-
-/// Convert a raw ADC reading to voltage
-///
-/// # Arguments
-/// * `raw_value` - Raw 16-bit ADC reading
-/// * `range` - Input range configuration used
-/// * `vref` - Reference voltage (typically 4.096V)
-///
-/// # Returns
-/// Voltage in volts
-pub fn raw_to_voltage(raw_value: u16, range: InputRange, vref: f32) -> f32 {
-    match range {
-        // Bipolar ranges - interpret as signed 16-bit
-        InputRange::BipolarThreeVref => {
-            let signed = raw_value as i16;
-            (signed as f32 / 32768.0) * 3.0 * vref
-        }
-        InputRange::BipolarTwoPointFiveVref => {
-            let signed = raw_value as i16;
-            (signed as f32 / 32768.0) * 2.5 * vref
-        }
-        InputRange::BipolarOnePointFiveVref => {
-            let signed = raw_value as i16;
-            (signed as f32 / 32768.0) * 1.5 * vref
-        }
-        InputRange::BipolarOnePointTwoFiveVref => {
-            let signed = raw_value as i16;
-            (signed as f32 / 32768.0) * 1.25 * vref
-        }
-        InputRange::BipolarZeroPointSixTwoFiveVref => {
-            let signed = raw_value as i16;
-            (signed as f32 / 32768.0) * 0.625 * vref
-        }
-        // Unipolar ranges - interpret as unsigned 16-bit
-        InputRange::UnipolarThreeVref => {
-            (raw_value as f32 / 65536.0) * 3.0 * vref
-        }
-        InputRange::UnipolarTwoPointFiveVref => {
-            (raw_value as f32 / 65536.0) * 2.5 * vref
-        }
-        InputRange::UnipolarOnePointFiveVref => {
-            (raw_value as f32 / 65536.0) * 1.5 * vref
-        }
-        InputRange::UnipolarOnePointTwoFiveVref => {
-            (raw_value as f32 / 65536.0) * 1.25 * vref
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // Import vec! macro and other std features for tests
-    extern crate std;
-    use std::vec;
-    use embedded_hal_mock::eh1::spi::{Mock as SpiMock, Transaction as SpiTransaction};
-    use embedded_hal_mock::eh1::digital::Mock as PinMock;
-
-    #[test]
-    fn test_command_encoding() {
-        let spi = SpiMock::new(&[
-            SpiTransaction::transaction_start(),
-            SpiTransaction::transfer(
-                vec![0b00000000, 0x14, 0x00, 0x00],
-                vec![0x00, 0x00, 0xAB, 0xCD],
-            ),
-            SpiTransaction::transaction_end(),
-        ]);
-        let cs = PinMock::new(&[]);
-
-        let mut adc = ADS8681::new(spi, cs);
-
-        // Send NOP command to address 0x14 with no data
-        let result = adc.send_command(Command::Nop, 0x14, 0x0000);
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), 0x0000ABCD);
-
-        let (mut spi, mut cs) = adc.release();
-        spi.done();
-        cs.done();
-    }
-
-    #[test]
-    fn test_read_register_command_sequence() {
-        let spi = SpiMock::new(&[
-            // First transaction: READ_HWORD command
-            SpiTransaction::transaction_start(),
-            SpiTransaction::transfer(
-                vec![0b11001000, 0x00, 0x00, 0x00], // READ_HWORD to DeviceId (0x00)
-                vec![0x00, 0x00, 0x00, 0x00],
-            ),
-            SpiTransaction::transaction_end(),
-            // Second transaction: NOP to retrieve data
-            SpiTransaction::transaction_start(),
-            SpiTransaction::transfer(
-                vec![0b00000000, 0x00, 0x00, 0x00], // NOP
-                vec![0x06, 0x81, 0x00, 0x00], // Device ID in upper 16 bits
-            ),
-            SpiTransaction::transaction_end(),
-        ]);
-        let cs = PinMock::new(&[]);
-
-        let mut adc = ADS8681::new(spi, cs);
-        let device_id = adc.read_register(Register::DeviceId);
-
-        assert!(device_id.is_ok());
-        assert_eq!(device_id.unwrap(), 0x0681);
-
-        let (mut spi, mut cs) = adc.release();
-        spi.done();
-        cs.done();
-    }
-
-    #[test]
-    fn test_write_register() {
-        let spi = SpiMock::new(&[
-            SpiTransaction::transaction_start(),
-            SpiTransaction::transfer(
-                vec![0b11010000, 0x14, 0x00, 0x03], // WRITE_FULL to RangeSel with value 0x0003
-                vec![0x00, 0x00, 0x00, 0x00],
-            ),
-            SpiTransaction::transaction_end(),
-        ]);
-        let cs = PinMock::new(&[]);
-
-        let mut adc = ADS8681::new(spi, cs);
-        let result = adc.write_register(Register::RangeSel, 0x0003);
-
-        assert!(result.is_ok());
-
-        let (mut spi, mut cs) = adc.release();
-        spi.done();
-        cs.done();
-    }
-
-    #[test]
-    fn test_set_input_range() {
-        let spi = SpiMock::new(&[
-            SpiTransaction::transaction_start(),
-            SpiTransaction::transfer(
-                vec![0b11010000, 0x14, 0x00, 0x00], // WRITE_FULL to RangeSel
-                vec![0x00, 0x00, 0x00, 0x00],
-            ),
-            SpiTransaction::transaction_end(),
-        ]);
-        let cs = PinMock::new(&[]);
-
-        let mut adc = ADS8681::new(spi, cs);
-        let result = adc.set_input_range(InputRange::BipolarThreeVref);
-
-        assert!(result.is_ok());
-
-        let (mut spi, mut cs) = adc.release();
-        spi.done();
-        cs.done();
-    }
-
-    #[test]
-    fn test_voltage_conversion_bipolar() {
-        let vref = 4.096;
-
-        // Test positive full scale (±12.288V range)
-        let voltage = raw_to_voltage(0x7FFF, InputRange::BipolarThreeVref, vref);
-        assert!((voltage - 12.287).abs() < 0.01);
-
-        // Test negative full scale
-        let voltage = raw_to_voltage(0x8000, InputRange::BipolarThreeVref, vref);
-        assert!((voltage + 12.288).abs() < 0.01);
-
-        // Test zero
-        let voltage = raw_to_voltage(0x0000, InputRange::BipolarThreeVref, vref);
-        assert!(voltage.abs() < 0.01);
-    }
-
-    #[test]
-    fn test_voltage_conversion_unipolar() {
-        let vref = 4.096;
-
-        // Test full scale (0-12.288V range)
-        let voltage = raw_to_voltage(0xFFFF, InputRange::UnipolarThreeVref, vref);
-        assert!((voltage - 12.288).abs() < 0.01);
-
-        // Test zero
-        let voltage = raw_to_voltage(0x0000, InputRange::UnipolarThreeVref, vref);
-        assert!(voltage.abs() < 0.01);
-
-        // Test mid-scale
-        let voltage = raw_to_voltage(0x8000, InputRange::UnipolarThreeVref, vref);
-        assert!((voltage - 6.144).abs() < 0.01);
     }
 }
