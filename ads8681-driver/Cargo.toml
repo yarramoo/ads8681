@@ -1,0 +1,16 @@
+[package]
+name = "ads8681-driver"
+version = "0.1.0"
+edition = "2021"
+authors = ["ADS8681 Driver Contributors"]
+description = "Embedded Rust driver for the Texas Instruments ADS8681 16-bit ADC"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/yourusername/ads8681-driver"
+keywords = ["embedded", "adc", "ads8681", "driver", "embedded-hal"]
+categories = ["embedded", "hardware-support", "no-std"]
+
+[dependencies]
+embedded-hal = "1.0"
+
+[dev-dependencies]
+embedded-hal-mock = "0.11"
